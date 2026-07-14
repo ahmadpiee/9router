@@ -3,6 +3,8 @@ import { getModelsByProviderId } from "open-sse/config/providerModels.js";
 // ─── Constants ───────────────────────────────────────────────────────────────
 export const QUOTA_CACHE_KEY = "quotaCacheData";
 export const REFRESH_INTERVAL_MS = 60000;
+// Claude usage/quota endpoint rate-limits; poll it less often than other providers
+export const CLAUDE_REFRESH_INTERVAL_MS = 180000;
 export const DEPLETED_QUOTA_THRESHOLD = 5;
 export const AUTO_REFRESH_STORAGE_KEY = "quotaAutoRefresh";
 export const CONNECTIONS_PAGE_SIZE = 20;
@@ -21,11 +23,10 @@ export const QUOTA_SORT_OPTIONS = [
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
 export function getConnectionLabel(connection) {
-  const isEmail = (value) =>
-    typeof value === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
-  if (isEmail(connection.email)) return connection.email;
-  if (isEmail(connection.name)) return connection.name;
-  return connection.name;
+  return connection.name?.trim()
+    || connection.email?.trim()
+    || connection.displayName?.trim()
+    || null;
 }
 
 export function getConnectionQuotaRemaining(connection, quotaData) {
@@ -419,6 +420,41 @@ export function parseQuotaData(provider, data) {
         // The 'Remaining (USD)' row needs explicit remainingPercentage because
         // its used/total values would otherwise compute the wrong direction
         // (e.g. used=95.5 / total=100 → 4% instead of 96%).
+        if (data.quotas) {
+          Object.entries(data.quotas).forEach(([name, quota]) => {
+            normalizedQuotas.push({
+              name,
+              used: quota.used || 0,
+              total: quota.total || 0,
+              resetAt: quota.resetAt || null,
+              remainingPercentage: quota.remainingPercentage,
+            });
+          });
+        }
+        break;
+
+      case "codebuddy-cn":
+        // CodeBuddy CN mixes recurring refill packs ("Monthly"/"Weekly"/...)
+        // with one-shot bonus packs ("Bonus Pack N"). Forward `recurring`
+        // so the UI can show "Expires in" for bonus packs (whose resetAt is
+        // a hard expiry, not a refresh) instead of "Reset in".
+        if (data.quotas) {
+          Object.entries(data.quotas).forEach(([name, quota]) => {
+            normalizedQuotas.push({
+              name,
+              used: quota.used || 0,
+              total: quota.total || 0,
+              resetAt: quota.resetAt || null,
+              recurring: quota.recurring !== false,
+            });
+          });
+        }
+        break;
+
+      case "grok-cli":
+        // Grok Build credits (on-demand window + prepaid balance).
+        // Do NOT forward absolute `remaining` — getRemainingPercentage treats
+        // it as a 0–100 percentage (same as Qoder). Use remainingPercentage.
         if (data.quotas) {
           Object.entries(data.quotas).forEach(([name, quota]) => {
             normalizedQuotas.push({
